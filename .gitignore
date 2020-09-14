@@ -1,39 +1,450 @@
-# History files
-.Rhistory
-.Rapp.history
+#Q1
+require(foreign)
+require(data.table)
+require(zoo)
+require(lubridate)
+require(dplyr)
+require(moments)
+require(readr)
+require(ggplot2)
+setwd("C:/Users/think/Desktop/MFE courses quarter3/QAM/week8/HW4")
 
-# Session Data files
-.RData
+# Download data and change it to data.table as our input
+CRSP <- read_csv("CRSP196901.csv", col_types=cols(
+  PERMNO=col_integer(),
+  date=col_date("%Y/%m/%d"),
+  SHRCD=col_integer(),
+  EXCHCD=col_integer(),
+  PERMCO=col_integer(),
+  DLRET=col_character(),
+  PRC=col_double(),
+  RET=col_character(),
+  SHROUT=col_integer(),
+  RETX=col_character(),
+  DLRETX=col_character()
+))
+CRSP <- data.table(CRSP)
 
-# User-specific files
-.Ruserdata
+CRSP_Cstat=read.csv("link.csv")
+CRSP_Cstat=data.table(CRSP_Cstat)
+CRSP_Cstat[,LINKDT:=as.Date(as.character(LINKDT),"%Y/%m/%d")]
+CRSP_Cstat[,LINKENDDT:=as.Date(as.character(LINKENDDT),"%Y/%m/%d")]
+CRSP_Cstat[,gvkey:=as.integer(gvkey)]
+CRSP_Cstat[,LPERMNO:=as.integer(LPERMNO)]
+CRSP_Cstat[,LPERMCO:=as.integer(LPERMCO)]
 
-# Example code in package build process
-*-Ex.R
 
-# Output files from R CMD build
-/*.tar.gz
+#prepare CRSP data
+for(i in c("RET","DLRET","RETX","DLRETX")){
+  CRSP[,paste0(i):=as.character(get(i))]
+  CRSP[get(i)%in%c("","A","B","C","P","S","T"),paste0(i):=NA]
+  CRSP[,paste0(i):=as.numeric(get(i))]
+  CRSP[get(i)%in%c(-66,-77,-88,-99),paste0(i):=NA]
+}
 
-# Output files from R CMD check
-/*.Rcheck/
+#total returns by PERMNO
+CRSP[is.na(DLRET)&!is.na(RET),Ret:=RET]
+CRSP[!is.na(DLRET)&is.na(RET),Ret:=DLRET]
+CRSP[!is.na(DLRET)&!is.na(RET),Ret:=(1+RET)*(1+DLRET)-1]
+CRSP[is.na(DLRETX)&!is.na(RETX),RetX:=RETX]
+CRSP[!is.na(DLRETX)&is.na(RETX),Ret:=DLRETX]
+CRSP[!is.na(DLRETX)&!is.na(RETX),RetX:=(1+RETX)*(1+DLRETX)-1]
+CRSP[!is.na(RETX),RetX:=Ret]
 
-# RStudio files
-.Rproj.user/
+#market cap by PERMNO
+CRSP[,Mkt_Cap:=abs(PRC)*SHROUT]
+setorder(CRSP,PERMNO,date)
+CRSP[,lag_Mkt_Cap:=shift(Mkt_Cap),by=PERMNO]
 
-# produced vignettes
-vignettes/*.html
-vignettes/*.pdf
+#limit data to that with full availability
+CRSP[,YrMo:=year(date)*12+month(date)]
+CRSP[,prev_YrMo:=shift(YrMo,1),by=PERMNO]
+CRSP[,Valid_lag:=YrMo==(prev_YrMo+1)]
+CRSP=CRSP[Valid_lag==T&lag_Mkt_Cap>0&!is.na(Ret)]
 
-# OAuth2 token, see https://github.com/hadley/httr/releases/tag/v0.3
-.httr-oauth
+#Aggregate PERMNO returns to PERMCO
 
-# knitr and R markdown default cache directories
-*_cache/
-/cache/
+#Only aggregate up valid stuff
+CRSP=CRSP[(EXCHCD==1|EXCHCD==2|EXCHCD==3)&(SHRCD==10|SHRCD==11)]
+CRSP[,Year:=year(date)]
+CRSP[,Month:=month(date)]
+market_06<-CRSP[Month==6,-c(2:13,15:18,20)]
+colnames(market_06)<-c("PERMNO","Mkt_Cap_06","Year")
+setkey(market_06,PERMNO,Year)
+market_12<-CRSP[Month==12,-c(2:13,15:18,20)]
+colnames(market_12)<-c("PERMNO","Mkt_Cap_12","Year")
+setkey(market_12,PERMNO,Year)
+CRSP[,Month_original:=Month]
+CRSP[,Month:=ifelse(Month>=7,Month-6,Month+6)]
+CRSP[,Year_original:=Year]
+CRSP[,Year:=ifelse(Month_original>=7,Year-1,Year-2)]
+setkey(CRSP,PERMNO,Year)
+CRSP<-left_join(CRSP,market_12,by=c("PERMNO","Year"))%>%as.data.table()
+CRSP[,Year:=ifelse(Month_original>=7,Year_original,Year_original-1)]
+CRSP<-left_join(CRSP,market_06,by=c("PERMNO","Year"))%>%as.data.table()
+CRSP=CRSP[!is.na(Mkt_Cap_06)&!is.na(Mkt_Cap_12),]
 
-# Temporary files created by R markdown
-*.utf8.md
-*.knit.md
+#Require previous month's market cap to do if multiple PERMNOs per PERMCO
+CRSP[,PERMNO_weight:=lag_Mkt_Cap/sum(lag_Mkt_Cap),by=.(PERMNO,date)]
+CRSP[,Ret:=sum(PERMNO_weight*Ret),by=.(PERMNO,date)]
+CRSP[,RetX:=sum(PERMNO_weight*RetX),by=.(PERMNO,date)]
+CRSP[,lag_Mkt_Cap:=sum(lag_Mkt_Cap),by=.(PERMNO,date)]
+CRSP[,Mkt_Cap_06:=sum(Mkt_Cap_06),by=.(PERMNO,date)]
+CRSP[,Mkt_Cap_12:=sum(Mkt_Cap_12),by=.(PERMNO,date)]
+CRSP=unique(CRSP[,.(PERMCO,EXCHCD,SHRCD,date,lag_Mkt_Cap,Mkt_Cap_06,Mkt_Cap_12,Ret,RetX)],by=c("PERMCO","date"))
 
-# R Environment Variables
-.Renviron
+#link CRSP to CRSP/Compustats
+merged=merge(CRSP,CRSP_Cstat,by.x="PERMCO",by.y="LPERMCO",allow.cartesian = TRUE)
+
+#typical checks after merge
+nrow(merge)
+nrow(CRSP)
+merged[,N:=.N,by=.(PERMCO,date)]
+nrow(merged[N>1])
+
+#step 0: date is within the linking range
+merged=merged[(is.na(LINKDT)|date>=LINKDT)&(is.na(LINKENDDT)|date<=LINKENDDT)]
+
+setorder(merged,gvkey,date)
+
+#Multiple GVKEYs per PERMNO
+
+#First, if LC not LC linktype, only keep LC
+#link complete
+merged[,prob:=.N>1,by=.(PERMCO,date)]
+merged[,Good_match:=sum(LINKTYPE=="LC"),by=.(PERMCO,date)]
+merged=merged[!(prob==T & Good_match>1 & LINKTYPE != "LC")]
+
+#Second, if P and not P linkprim, only keep P
+merged[,prob:=.N>1,by=.(PERMCO,date)]
+merged[,Good_match:=sum(LINKTYPE=="P"),by=.(PERMCO,date)]
+merged=merged[!(prob==T & Good_match>1 & LINKTYPE != "P")]
+
+#Second## if C and not C linkprim, only keep C
+merged[,prob:=.N>1,by=.(PERMCO,date)]
+merged[,Good_match:=sum(LINKTYPE=="C"),by=.(PERMCO,date)]
+merged=merged[!(prob==T & Good_match>1 & LINKTYPE != "C")]
+
+#Third, if 1 and not 1 liid, only keep 1
+merged[,prob:=.N>1,by=.(PERMCO,date)]
+merged[,Good_match:=sum(LIID==1),by=.(PERMCO,date)]
+merged=merged[!(prob==T & Good_match>1 & LIID!=1)]
+
+#700+ duplicates left, magnitude small .but still need to make sure they are one on one
+#Fourth, use the link that's current
+merged[,prob:=.N>1,by=.(PERMCO,date)]
+merged[,Good_match:=sum(is.na(LINKENDDT)),by=.(PERMCO,date)]
+merged=merged[!(prob==T & Good_match>1 & !is.na(LINKENDDT))]
+
+#Fifth, use the link that's been around the longest
+merged[,prob:=.N>1,by=.(PERMCO,date)]
+merged[,Good_match:=NULL]
+merged=merged[is.na(LINKENDDT),LINKENDDT:=as.Date("2020-12-31","%Y-%m-%d")]
+merged[,Date_diff:= as.integer(LINKENDDT-LINKDT)]
+setorder(merged,PERMCO,date,Date_diff)
+merged[prob==T,Good_match:=Date_diff==Date_diff[.N],by=.(PERMCO,date)]
+merged=merged[!(prob==T&Good_match!=T)]
+
+#Sixth, use the GVKEY that has been around the longest
+merged[,prob:=.N>1,by=.(PERMCO,date)]
+merged[,Good_match:=NULL]
+setorder(merged,gvkey,LINKDT)
+merged[prob==T,start_Date:=LINKDT[1],by=.(gvkey)]
+setorder(merged,gvkey,LINKENDDT)
+merged[prob==T,end_Date:=LINKENDDT[.N],by=.(gvkey)]
+merged[,Date_diff:=as.integer(end_Date-start_Date)]
+setorder(merged,PERMCO,date,Date_diff)
+merged[prob==T,Good_match:=Date_diff==Date_diff[.N],by=.(PERMCO,date)]
+merged=merged[!(prob==T&Good_match!=T)]
+
+#Seventh, use the smaller gvkey
+setorder(merged,PERMCO,date,gvkey)
+merged=unique(merged,by=c("PERMCO","date"))
+
+#Clean up extra variables and final check of the match
+merged=merged[,.(gvkey,date,EXCHCD,lag_Mkt_Cap,Mkt_Cap_06,Mkt_Cap_12,Ret,RetX)]
+
+#make merge date begin from 1973
+merged[,Year:=year(date)]
+merged[,Month:=month(date)]
+#merged=merged[Year>=1973]
+
+#input fundamental information
+fundamental<-read.csv("fundamental1969.csv")%>%data.table
+fundamental<- data.table(fundamental[,-c(4:9,21)])
+fundamental[,date:=ymd(datadate)]
+fundamental[,Year:=year(date)]
+fundamental[,Month:=month(date)]
+fundamental<-fundamental[,-2]
+fundamental[,SHE:=ifelse(!is.na(seq),seq,ifelse(!is.na(ceq+pstk),(ceq+pstk),ifelse(!is.na(at-lt-mib),(at-lt-mib),ifelse(!is.na(at-lt),(at-lt),NA))))]
+fundamental[,DT:=ifelse(!is.na(txditc),txditc,ifelse(!is.na(txdb+itcb),(txdb+itcb),ifelse(!is.na(sum(txditc+txdb+itcb,na.omit=TRUE)),sum(txditc+txdb+itcb,na.omit=TRUE),0)))]
+fundamental[,PS:=ifelse(!is.na(pstkrv),pstkrv,ifelse(!is.na(pstkl),pstkl,ifelse(!is.na(pstk),pstk,0)))]
+setkey(fundamental,GVKEY,Year)
+
+#add PRBA
+PRBA<-read.csv("PRBA.csv")
+PRBA<- data.table(PRBA[,-c(2:5)])
+PRBA[,GVKEY:=gvkey]
+PRBA[,date:=ymd(datadate)]
+PRBA[,Year:=year(date)]
+PRBA[,Month:=month(date)]
+PRBA<-PRBA[,-c(1,3,5,7)]
+setkey(PRBA,GVKEY,Year)
+fudamental_final<-left_join(fundamental,PRBA,by=c("GVKEY","Year"))%>%as.data.table()
+fudamental_final[,prba:=ifelse(!is.na(prba),prba,0)]
+fudamental_final[,BE:=(SHE-PS+DT-prba)]
+fundamental_BE<-fudamental_final[!is.na(BE),c(1,2,21)]
+fundamental_BE[,Year:=fyear]
+fundamental_BE[,gvkey:=GVKEY]
+fundamental_BE<-fundamental_BE[,-c(1,2)]
+setkey(fundamental_BE,gvkey,Year)
+merged[,Month_original:=Month]
+merged[,Month:=ifelse(Month>=7,Month-6,Month+6)]
+merged[,Year_original:=Year]
+merged[,Year:=ifelse(Month_original>=7,Year-1,Year-2)]
+setkey(merged,gvkey,Year)
+
+merged_final<-left_join(merged,fundamental_BE,by=c("gvkey","Year"))%>%as.data.table()
+merged_final<-na.omit(merged_final)
+merged_final[,BM:=1000*BE/Mkt_Cap_12]
+merged_final[,Month:=Month_original]
+merged_final[,Year:=Year_original]
+merged_final<-merged_final[,-c(11,12)]
+merged_final<-merged_final[Year>=1973,]
+
+#value_decile
+setorder(merged_final,Year,Month,Mkt_Cap_06)
+size=copy(merged_final[EXCHCD==1])
+size[,size_decile:=cut(Mkt_Cap_06,breaks = quantile(Mkt_Cap_06,probs=seq(0,1,by=.1)),labels=F,right=F),by=.(Year,Month)]
+size[is.na(size_decile),size_decile:=as.integer(10)]
+merged_final=merge(merged_final,size[,.(Year,Month,gvkey,size_decile)],by=c("Year","Month","gvkey"),all.x=T)
+setorder(merged_final,Year,Month,Mkt_Cap_06)
+merged_final[,size_decile:=na.locf(size_decile,na.rm=F),by=.(Year,Month)]
+merged_final[,size_decile:=as.integer(as.character(size_decile))]
+merged_final[is.na(size_decile),size_decile:=as.integer(1)]
+
+#value_decile
+setorder(merged_final,Year,Month,BM)
+value=copy(merged_final[EXCHCD==1])
+value[,value_decile:=cut(BM,breaks = quantile(BM,probs=seq(0,1,by=.1)),labels=F,right=F),by=.(Year,Month)]
+value[is.na(value_decile),value_decile:=as.integer(10)]
+merged_final=merge(merged_final,value[,.(Year,Month,gvkey,value_decile)],by=c("Year","Month","gvkey"),all.x=T)
+setorder(merged_final,Year,Month,BM)
+merged_final[,value_decile:=na.locf(value_decile,na.rm=F),by=.(Year,Month)]
+merged_final[,value_decile:=as.integer(as.character(value_decile))]
+merged_final[is.na(value_decile),value_decile:=as.integer(1)]
+
+#now calculate the Size and BM
+merged_final[size_decile<=5&value_decile>7,port:=1]
+merged_final[size_decile>5&value_decile>7,port:=2]
+merged_final[size_decile<=5&value_decile%in%c(4:7),port:=3]
+
+merged_final[size_decile>5&value_decile%in%c(4:7),port:=4]
+merged_final[size_decile<=5&value_decile<4,port:=5]
+merged_final[size_decile>5&value_decile<4,port:=6]
+
+setkey(merged_final, Month, Year, port)
+port_ret<-merged_final[,list(port_ret = weighted.mean(Ret, lag_Mkt_Cap)),by = list(Year, Month, port)]
+setkey(port_ret,Year,Month)
+
+DM<-port_ret[which(port==1)][,-3]
+for(i in 2:6){
+  DM<-inner_join(DM,port_ret[which(port==i)][,-3],by=c("Year","Month"))
+}
+colnames(DM)<-c("Year", "Month", "Decile 1", "Decile 2", "Decile 3", "Decile 4", "Decile 5", "Decile 6")
+DM$HML_Ret<-0.5*(DM$`Decile 1`+DM$`Decile 2`-DM$`Decile 5`-DM$`Decile 6`)
+DM$SMB_Ret<-(DM$`Decile 1`+DM$`Decile 3`+DM$`Decile 5`-DM$`Decile 2`-DM$`Decile 4`-DM$`Decile 6`)/3
+Q1_output<-DM%>%as.data.frame()
+
+merged_final[, Size_flag:=size_decile <=5]
+merged_final[, BtM_flag:=ifelse(value_decile >7, 3, ifelse(value_decile <4, 1, 2))]
+Result_Q1_1 = merged_final[, list(Size_Ret=weighted.mean(Ret, lag_Mkt_Cap),
+                                  lag_Mkt_Cap = sum(lag_Mkt_Cap)), by=list(Year, Month, port, Size_flag)]
+Result_Q1_1[, Size_Ret:=weighted.mean(Size_Ret, lag_Mkt_Cap), by=list(Year, Month,Size_flag)]
+setorder(Result_Q1_1, Year, Month, port)
+Result_Q1_2 = merged_final[, list(BtM_Ret=weighted.mean(Ret, lag_Mkt_Cap),
+                                  lag_Mkt_Cap = sum(lag_Mkt_Cap)), by=list(Year, Month, port, BtM_flag)]
+Result_Q1_2[, BtM_Ret:=weighted.mean(BtM_Ret, lag_Mkt_Cap), by=list(Year, Month,BtM_flag)]
+setorder(Result_Q1_2, Year, Month, port)
+
+Result_Q1 = merge(Result_Q1_1, Result_Q1_2, by=c("Year", "Month", "port"))
+Result_Q1[, HML_ret:=BtM_Ret[1] - BtM_Ret[.N], by=list(Year, Month)]
+Result_Q1[, SML_ret:=Size_Ret[1] - BtM_Ret[.N], by=list(Year, Month)]
+Q1_output_result<-Result_Q1[,-c(4,6,7,9)]
+
+
+#Q2
+FF_mkt <- as.data.table(lapply(read.csv("FF_mkt.csv",skip=3,stringsAsFactors = FALSE)[1:1122,],as.numeric))
+FF_mkt$month<-substring(FF_mkt$X, 5, 6)
+FF_mkt$year<-substring(FF_mkt$X, 1,4)
+FF_mkt<-FF_mkt[,-1]
+FF_mkt<-FF_mkt[,c(6,5,1,2,3,4)]
+FF_mkt <- as.data.table(cbind(apply(FF_mkt[,1:2],2,as.integer),FF_mkt[,3:6]))
+FF_mkt[,3:6]<-FF_mkt[,3:6]/100
+colnames(FF_mkt)<-c("Year", "Month", "Market_minus_Rf", "SMB", "HML", "Rf")
+FF_mkt<-FF_mkt[Year>=1973&Year<=2019,]
+
+#size portfolio
+Fama_size <- as.data.table(lapply(read.csv("size.csv",skip=12,stringsAsFactors = FALSE)[1:1126,-c(2:10)],as.numeric))
+Fama_size $month<-substring(Fama_size $X, 5, 6)
+Fama_size $year<-substring(Fama_size $X, 1,4)
+Fama_size <-Fama_size [,-1]
+Fama_size <-Fama_size [,c(12,11,1,2,3,4,5,6,7,8,9,10)]
+Fama_size  <- as.data.table(cbind(apply(Fama_size [,1:2],2,as.integer),Fama_size [,3:12]))
+Fama_size [,3:12]<-Fama_size [,3:12]/100
+colnames(Fama_size )<-c("Year", "Month", "Decile 1", "Decile 2", "Decile 3", "Decile 4", "Decile 5", "Decile 6", "Decile 7",
+                         "Decile 8", "Decile 9", "Decile 10")
+Fama_size $WML<-Fama_size $`Decile 1`-Fama_size $`Decile 10`
+Fama_size <-as.data.table(Fama_size )
+Fama_size<-Fama_size[Year>=1973&Year<=2019]%>%as.data.frame()
+
+setkey(merged_final, Month, Year, size_decile)
+size_ret<-merged_final[,list(size_Ret = weighted.mean(Ret, lag_Mkt_Cap)),by = list(Year, Month, size_decile)]
+setkey(size_ret,Year,Month)
+
+DM<-size_ret[which(size_decile==1)][,-3]
+for(i in 2:10){
+  DM<-inner_join(DM,size_ret[which(size_decile==i)][,-3],by=c("Year","Month"))
+}
+colnames(DM)<-c("Year", "Month", "Decile 1", "Decile 2", "Decile 3", "Decile 4", "Decile 5", "Decile 6", "Decile 7",
+                "Decile 8", "Decile 9", "Decile 10")
+DM$WML<-DM$`Decile 1`-DM$`Decile 10`
+my_size<-DM
+
+#construct the result matrix
+PS4_Q2_result<-matrix(0,nrow=5,ncol = 11)
+colnames(PS4_Q2_result)<-c("Decile 1", "Decile 2", "Decile 3", "Decile 4", "Decile 5", "Decile 6", "Decile 7",
+                           "Decile 8", "Decile 9", "Decile 10", "WML")
+rownames(PS4_Q2_result)<-c("excess returns","Annualized volatility","Sharpe ratio","Skewness","Size portfolio correlation")
+
+#calculate correlation
+for(i in 1:11){
+  if(i<=10){
+  PS4_Q2_result[1,i]<-sprintf("%0.4f",mean(my_size[,(2+i)]-FF_mkt$Rf)*12)
+  PS4_Q2_result[2,i]<-sprintf("%0.4f",sd(my_size[,(2+i)]-FF_mkt$Rf)*sqrt(12))
+  PS4_Q2_result[3,i]<-sprintf("%0.4f",mean(my_size[,(2+i)]-FF_mkt$Rf)*sqrt(12/sd(my_size[,(2+i)]-FF_mkt$Rf)))
+  PS4_Q2_result[4,i]<-sprintf("%0.4f",skewness(my_size[,(2+i)]-FF_mkt$Rf))
+  PS4_Q2_result[5,i]<-sprintf("%0.4f",cor(Fama_size[,(2+i)],my_size[,(2+i)]))
+  }
+  else{
+    PS4_Q2_result[1,i]<-sprintf("%0.4f",mean(my_size[,(2+i)])*12)
+    PS4_Q2_result[2,i]<-sprintf("%0.4f",sd(my_size[,(2+i)])*sqrt(12))
+    PS4_Q2_result[3,i]<-sprintf("%0.4f",mean(my_size[,(2+i)])*sqrt(12/sd(my_size[,(2+i)])))
+    PS4_Q2_result[4,i]<-sprintf("%0.4f",skewness(my_size[,(2+i)]))
+    PS4_Q2_result[5,i]<-sprintf("%0.4f",cor(Fama_size[,(2+i)],my_size[,(2+i)])) 
+  }
+}
+
+Q2_output<-PS4_Q2_result
+
+
+#Q3
+#value portfolio
+Fama_value <- as.data.table(lapply(read.csv("value.csv",skip=23,stringsAsFactors = FALSE)[1:1126,-c(2:10)],as.numeric))
+Fama_value$month<-substring(Fama_value$X, 5, 6)
+Fama_value$year<-substring(Fama_value$X, 1,4)
+Fama_value<-Fama_value[,-1]
+Fama_value<-Fama_value[,c(12,11,1,2,3,4,5,6,7,8,9,10)]
+Fama_value <- as.data.table(cbind(apply(Fama_value[,1:2],2,as.integer),Fama_value[,3:12]))
+Fama_value[,3:12]<-Fama_value[,3:12]/100
+colnames(Fama_value)<-c("Year", "Month", "Decile 1", "Decile 2", "Decile 3", "Decile 4", "Decile 5", "Decile 6", "Decile 7",
+                        "Decile 8", "Decile 9", "Decile 10")
+Fama_value$WML<-Fama_value$`Decile 10`-Fama_value$`Decile 1`
+Fama_value<-as.data.table(Fama_value)
+Fama_value<-Fama_value[Year>=1973&Year<=2019]%>%as.data.frame()
+
+setkey(merged_final, Month, Year, value_decile)
+value_ret<-merged_final[,list(value_Ret = weighted.mean(Ret, lag_Mkt_Cap)),by = list(Year, Month, value_decile)]
+setkey(value_ret,Year,Month)
+
+DM<-value_ret[which(value_decile==1)][,-3]
+for(i in 2:10){
+  DM<-inner_join(DM,value_ret[which(value_decile==i)][,-3],by=c("Year","Month"))
+}
+colnames(DM)<-c("Year", "Month", "Decile 1", "Decile 2", "Decile 3", "Decile 4", "Decile 5", "Decile 6", "Decile 7",
+                "Decile 8", "Decile 9", "Decile 10")
+DM$WML<-DM$`Decile 10`-DM$`Decile 1`
+my_value<-DM
+
+#construct the result matrix
+PS4_Q3_result<-matrix(0,nrow=5,ncol = 11)
+colnames(PS4_Q3_result)<-c("Decile 1", "Decile 2", "Decile 3", "Decile 4", "Decile 5", "Decile 6", "Decile 7",
+                           "Decile 8", "Decile 9", "Decile 10", "WML")
+rownames(PS4_Q3_result)<-c("excess returns","Annualized volatility","Sharpe ratio","Skewness","Value portfolio correlation")
+
+#calculate correlation
+for(i in 1:11){
+  if(i<=10){
+  PS4_Q3_result[1,i]<-sprintf("%0.4f",mean(my_value[,(2+i)]-FF_mkt$Rf)*12)
+  PS4_Q3_result[2,i]<-sprintf("%0.4f",sd(my_value[,(2+i)]-FF_mkt$Rf)*sqrt(12))
+  PS4_Q3_result[3,i]<-sprintf("%0.4f",mean(my_value[,(2+i)]-FF_mkt$Rf)*sqrt(12)/sd(my_value[,(2+i)]-FF_mkt$Rf))
+  PS4_Q3_result[4,i]<-sprintf("%0.4f",skewness(my_value[,(2+i)]-FF_mkt$Rf))
+  PS4_Q3_result[5,i]<-sprintf("%0.4f",cor(Fama_value[,(2+i)],my_value[,(2+i)]))
+  }
+  else{
+    PS4_Q3_result[1,i]<-sprintf("%0.4f",mean(my_value[,(2+i)])*12)
+    PS4_Q3_result[2,i]<-sprintf("%0.4f",sd(my_value[,(2+i)])*sqrt(12))
+    PS4_Q3_result[3,i]<-sprintf("%0.4f",mean(my_value[,(2+i)])*sqrt(12)/sd(my_value[,(2+i)]))
+    PS4_Q3_result[4,i]<-sprintf("%0.4f",skewness(my_value[,(2+i)]))
+    PS4_Q3_result[5,i]<-sprintf("%0.4f",cor(Fama_value[,(2+i)],my_value[,(2+i)]))
+  }
+}
+Q3_output<-PS4_Q3_result
+
+
+#Q4
+#cumulative return of size
+forplot=copy(Q1_output_result)
+forplot[,Dates:=as.Date(paste0(Year,"-",Month,"-","01"),"%Y-%m-%d")]
+forplot=forplot[order(port,Dates)]
+forplot[,cumret:=log(cumprod(1+Size_Ret)),by=.(port)]
+forplot[,cumret2:=log(cumprod(1+BtM_Ret)),by=.(port)]
+b=ggplot(forplot,aes(x=Dates,y=cumret))+
+  geom_line(aes(col=factor(port)))+theme_bw()
+b
+#cumulative return of value
+a=ggplot(forplot,aes(x=Dates,y=cumret2))+
+  geom_line(aes(col=factor(port)))+theme_bw()
+a
+
+
+#Q5
+#value portfolio
+Fama_value2 <- as.data.table(lapply(read.csv("6_Portfolios_2x3.csv",skip=15,stringsAsFactors = FALSE)[1:1126,],as.numeric))
+Fama_value2$month<-substring(Fama_value2$X, 5, 6)
+Fama_value2$year<-substring(Fama_value2$X, 1,4)
+Fama_value2<-Fama_value2[,-1]
+Fama_value2<-Fama_value2[,c(8,7,3,6,2,5,1,4)]
+Fama_value2 <- as.data.table(cbind(apply(Fama_value2[,1:2],2,as.integer),Fama_value2[,3:8]))
+Fama_value2[,3:8]<-Fama_value2[,3:8]/100
+colnames(Fama_value2)<-c("Year", "Month", "Decile 1", "Decile 2", "Decile 3", "Decile 4", "Decile 5", "Decile 6")
+Fama_value2$HML_Ret<-0.5*(Fama_value2$`Decile 1`+Fama_value2$`Decile 2`-Fama_value2$`Decile 5`-Fama_value2$`Decile 6`)
+Fama_value2$SMB_Ret<-(Fama_value2$`Decile 1`+Fama_value2$`Decile 3`+Fama_value2$`Decile 5`-Fama_value2$`Decile 2`-Fama_value2$`Decile 4`-Fama_value2$`Decile 6`)/3
+Fama_value2<-as.data.table(Fama_value2)
+Fama_value2<-Fama_value2[Year>=1973&Year<=2019]%>%as.data.frame()
+
+#construct the result matrix
+PS4_Q5_result<-matrix(0,nrow=5,ncol = 8)
+colnames(PS4_Q5_result)<-c("Decile 1", "Decile 2", "Decile 3", "Decile 4", "Decile 5", "Decile 6","HML","SMB")
+rownames(PS4_Q5_result)<-c("excess returns","Annualized volatility","Sharpe ratio","Skewness","Portfolio correlation")
+
+#calculate correlation
+for(i in 1:8){
+  PS4_Q5_result[1,i]<-sprintf("%0.4f",mean(Q1_output[,(2+i)]-FF_mkt$Rf)*12)
+  PS4_Q5_result[2,i]<-sprintf("%0.4f",sd(Q1_output[,(2+i)]-FF_mkt$Rf)*sqrt(12))
+  PS4_Q5_result[3,i]<-sprintf("%0.4f",mean(Q1_output[,(2+i)]-FF_mkt$Rf)*sqrt(12)/sd(Q1_output[,(2+i)]-FF_mkt$Rf))
+  PS4_Q5_result[4,i]<-sprintf("%0.4f",skewness(Q1_output[,(2+i)]-FF_mkt$Rf))
+  PS4_Q5_result[5,i]<-sprintf("%0.4f",cor(Fama_value2[,(2+i)],Q1_output[,(2+i)]))
+}
+Q5_output<-PS4_Q5_result
+
+
+forplot=copy(FF_mkt)
+forplot[,Dates:=as.Date(paste0(Year,"-",Month,"-","01"),"%Y-%m-%d")]
+forplot[,cumret:=log(cumprod(1+SMB))]
+forplot[,cumret2:=log(cumprod(1+HML))]
+plot(forplot$Dates,forplot$cumret2,type="l",col="red",ylim = c(-0.3,2.0),xlab = "time",ylab = "value")
+lines(forplot$Dates,forplot$cumret,type="l",col="blue")
+
+#Q6 (in the PDF)
+
